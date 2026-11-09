@@ -199,6 +199,54 @@ Respond ONLY with valid JSON (no markdown, no extra text):
   return null;
 }
 
+// ─── Induction settings ───────────────────────────────────────────────────────
+// min_watch_percent = how much of the induction content a visitor must view
+// before the "Proceed to quiz" button unlocks (0–100).
+async function readMinWatchPercent() {
+  const row = await db("system_config")
+    .where({ key: "video_min_watch_percent" })
+    .first();
+  const n = parseInt(row?.value, 10);
+  return Number.isFinite(n) ? Math.min(100, Math.max(0, n)) : 80;
+}
+
+// PUBLIC: GET /api/induction/settings
+router.get("/settings", async (req, res) => {
+  try {
+    res.json({ success: true, min_watch_percent: await readMinWatchPercent() });
+  } catch (err) {
+    res.json({ success: true, min_watch_percent: 80 });
+  }
+});
+
+// ADMIN: PUT /api/induction/settings
+router.put("/settings", authenticateAdmin, async (req, res) => {
+  try {
+    const n = parseInt(req.body.min_watch_percent, 10);
+    if (!Number.isFinite(n) || n < 0 || n > 100) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Enter a number between 0 and 100" });
+    }
+    const exists = await db("system_config")
+      .where({ key: "video_min_watch_percent" })
+      .first();
+    if (exists)
+      await db("system_config")
+        .where({ key: "video_min_watch_percent" })
+        .update({ value: String(n) });
+    else
+      await db("system_config").insert({
+        key: "video_min_watch_percent",
+        value: String(n),
+      });
+    res.json({ success: true, min_watch_percent: n });
+  } catch (err) {
+    console.error("Save settings error:", err);
+    res.status(500).json({ success: false, message: "Failed to save setting" });
+  }
+});
+
 // ─── PUBLIC: GET /api/induction/active ────────────────────────────────────────
 router.get("/active", async (req, res) => {
   try {

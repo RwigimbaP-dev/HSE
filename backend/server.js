@@ -141,6 +141,18 @@ const quizLimiter = rateLimit({
   },
 });
 
+// Checkout (public, identified by phone + ID): 30 per 10 min per IP
+const checkoutLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    success: false,
+    message: "Too many attempts. Please wait a few minutes and try again.",
+  },
+});
+
 // General API: 300 per minute
 const apiLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -153,6 +165,7 @@ const apiLimiter = rateLimit({
 app.use("/api/", apiLimiter);
 app.use("/api/auth/login", authLimiter);
 app.use("/api/visitors/register", registerLimiter);
+app.use("/api/visitors/checkout", checkoutLimiter);
 app.use("/api/quiz/", quizLimiter);
 
 // ─── Routes ───────────────────────────────────────────────────────────────────

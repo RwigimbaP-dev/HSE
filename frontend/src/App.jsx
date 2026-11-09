@@ -1,25 +1,33 @@
-import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
-import { Toaster } from 'react-hot-toast';
-import { LanguageProvider } from './context/LanguageContext';
-import { AuthProvider, useAuth } from './context/AuthContext';
-import { VisitorProvider } from './context/VisitorContext';
+import { useEffect } from "react";
+import { wakeServer } from "./api";
+import {
+  BrowserRouter,
+  Routes,
+  Route,
+  Navigate,
+  useLocation,
+} from "react-router-dom";
+import { Toaster } from "react-hot-toast";
+import { LanguageProvider } from "./context/LanguageContext";
+import { AuthProvider, useAuth } from "./context/AuthContext";
+import { VisitorProvider } from "./context/VisitorContext";
 
 // Visitor pages
-import LandingPage from './pages/visitor/LandingPage';
-import RegistrationPage from './pages/visitor/RegistrationPage';
-import InductionPage from './pages/visitor/InductionPage';
-import QuizPage from './pages/visitor/QuizPage';
-import CheckInPage from './pages/visitor/CheckInPage';
-import CheckOutPage from './pages/visitor/CheckOutPage';
+import LandingPage from "./pages/visitor/LandingPage";
+import RegistrationPage from "./pages/visitor/RegistrationPage";
+import InductionPage from "./pages/visitor/InductionPage";
+import QuizPage from "./pages/visitor/QuizPage";
+import CheckInPage from "./pages/visitor/CheckInPage";
+import CheckOutPage from "./pages/visitor/CheckOutPage";
 
 // Admin pages
-import AdminLoginPage from './pages/admin/AdminLoginPage';
-import AdminLayout from './pages/admin/AdminLayout';
-import DashboardPage from './pages/admin/DashboardPage';
-import VisitorsPage from './pages/admin/VisitorsPage';
-import ReportsPage from './pages/admin/ReportsPage';
-import QRCodePage from './pages/admin/QRCodePage';
-import InductionManagerPage from './pages/admin/InductionManagerPage';
+import AdminLoginPage from "./pages/admin/AdminLoginPage";
+import AdminLayout from "./pages/admin/AdminLayout";
+import DashboardPage from "./pages/admin/DashboardPage";
+import VisitorsPage from "./pages/admin/VisitorsPage";
+import ReportsPage from "./pages/admin/ReportsPage";
+import QRCodePage from "./pages/admin/QRCodePage";
+import InductionManagerPage from "./pages/admin/InductionManagerPage";
 
 // ─── PrivateRoute — redirects unauthenticated users to /admin/login ───────────
 function PrivateRoute({ children }) {
@@ -43,6 +51,10 @@ function AlreadyLoggedIn({ children }) {
 }
 
 export default function App() {
+  useEffect(() => {
+    wakeServer();
+  }, []);
+
   return (
     <BrowserRouter>
       <AuthProvider>
@@ -53,23 +65,25 @@ export default function App() {
               toastOptions={{
                 duration: 4000,
                 style: {
-                  fontFamily: 'Inter, sans-serif',
-                  fontSize: '0.9rem',
+                  fontFamily: "Inter, sans-serif",
+                  fontSize: "0.9rem",
                   maxWidth: 400,
                 },
-                success: { iconTheme: { primary: '#276749', secondary: '#fff' } },
-                error:   { iconTheme: { primary: '#c53030', secondary: '#fff' } },
+                success: {
+                  iconTheme: { primary: "#276749", secondary: "#fff" },
+                },
+                error: { iconTheme: { primary: "#c53030", secondary: "#fff" } },
               }}
             />
             <Routes>
               {/* ── Visitor-facing routes (public) ─── */}
-              <Route path="/"                    element={<LandingPage />} />
-              <Route path="/visitor"             element={<LandingPage />} />
-              <Route path="/visitor/register"    element={<RegistrationPage />} />
-              <Route path="/visitor/induction"   element={<InductionPage />} />
-              <Route path="/visitor/quiz"        element={<QuizPage />} />
-              <Route path="/visitor/checkin"     element={<CheckInPage />} />
-              <Route path="/visitor/checkout"    element={<CheckOutPage />} />
+              <Route path="/" element={<LandingPage />} />
+              <Route path="/visitor" element={<LandingPage />} />
+              <Route path="/visitor/register" element={<RegistrationPage />} />
+              <Route path="/visitor/induction" element={<InductionPage />} />
+              <Route path="/visitor/quiz" element={<QuizPage />} />
+              <Route path="/visitor/checkin" element={<CheckInPage />} />
+              <Route path="/visitor/checkout" element={<CheckOutPage />} />
 
               {/* ── Admin routes ─── */}
               {/* Login page: redirect away if already authenticated */}
@@ -91,12 +105,15 @@ export default function App() {
                   </PrivateRoute>
                 }
               >
-                <Route index element={<Navigate to="/admin/dashboard" replace />} />
+                <Route
+                  index
+                  element={<Navigate to="/admin/dashboard" replace />}
+                />
                 <Route path="dashboard" element={<DashboardPage />} />
-                <Route path="visitors"  element={<VisitorsPage />} />
+                <Route path="visitors" element={<VisitorsPage />} />
                 <Route path="induction" element={<InductionManagerPage />} />
-                <Route path="reports"   element={<ReportsPage />} />
-                <Route path="qr"        element={<QRCodePage />} />
+                <Route path="reports" element={<ReportsPage />} />
+                <Route path="qr" element={<QRCodePage />} />
               </Route>
 
               {/* Fallback */}
