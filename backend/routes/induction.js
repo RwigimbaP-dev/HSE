@@ -5,6 +5,7 @@ const fs = require("fs");
 const multer = require("multer");
 const { db } = require("../database/schema");
 const { authenticateAdmin } = require("../middleware/auth");
+const { audit, diffObjects } = require("../utils/audit");
 
 // ─── PDF text extraction (lazy-loaded) ───────────────────────────────────────
 let pdfParse = null;
@@ -240,6 +241,14 @@ router.put("/settings", authenticateAdmin, async (req, res) => {
         key: "video_min_watch_percent",
         value: String(n),
       });
+    await audit(req, {
+      action: "settings.update",
+      category: "system",
+      entity_type: "setting",
+      entity_label: "Required viewing %",
+      before: { min_watch_percent: exists ? Number(exists.value) : null },
+      after: { min_watch_percent: n },
+    });
     res.json({ success: true, min_watch_percent: n });
   } catch (err) {
     console.error("Save settings error:", err);
@@ -390,6 +399,14 @@ router.post("/url", authenticateAdmin, async (req, res) => {
     const item = await db("induction_content")
       .where({ id: id.id ?? id })
       .first();
+    await audit(req, {
+      action: "induction.create",
+      category: "induction",
+      entity_type: "induction_content",
+      entity_id: item.id,
+      entity_label: item.title,
+      details: { type: "video_url", language: item.language, url: item.url },
+    });
     res.json({ success: true, content: item });
   } catch (err) {
     console.error("Add URL error:", err);
@@ -459,6 +476,19 @@ router.post(
       const item = await db("induction_content")
         .where({ id: id.id ?? id })
         .first();
+      await audit(req, {
+        action: "induction.create",
+        category: "induction",
+        entity_type: "induction_content",
+        entity_id: item.id,
+        entity_label: item.title,
+        details: {
+          type: item.type,
+          file: item.file_name,
+          size: item.file_size,
+          language: item.language,
+        },
+      });
       res.json({
         success: true,
         content: {
@@ -511,6 +541,32 @@ router.put("/:id", authenticateAdmin, async (req, res) => {
 
     await db("induction_content").where({ id }).update(updates);
     const updated = await db("induction_content").where({ id }).first();
+    const d = diffObjects(item, updated, [
+      "title",
+      "description",
+      "language",
+      "url",
+      "duration_seconds",
+      "sort_order",
+      "is_active",
+      "key_points",
+    ]);
+    if (d.changed.length) {
+      await audit(req, {
+        action:
+          d.changed.length === 1 && d.changed[0] === "is_active"
+            ? updated.is_active
+              ? "induction.activate"
+              : "induction.deactivate"
+            : "induction.update",
+        category: "induction",
+        entity_type: "induction_content",
+        entity_id: item.id,
+        entity_label: updated.title,
+        before: d.before,
+        after: d.after,
+      });
+    }
     res.json({ success: true, content: updated });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -636,11 +692,33 @@ router.post("/preview-quiz-all", authenticateAdmin, async (req, res) => {
 // ─── DELETE /api/induction/:id ────────────────────────────────────────────────
 router.delete("/:id", authenticateAdmin, async (req, res) => {
   try {
+    const reason = String(req.body?.reason || "").trim();
+    if (reason.length < 5) {
+      return res
+        .status(400)
+        .json({
+          success: false,
+          code: "REASON_REQUIRED",
+          message: "A reason (at least 5 characters) is required.",
+        });
+    }
+
     const item = await db("induction_content")
       .where({ id: req.params.id })
       .first();
     if (!item)
       return res.status(404).json({ success: false, message: "Not found" });
+
+    const { content_text, ...snapshot } = item; // keep the audit row small
+    await audit(req, {
+      action: "induction.delete",
+      category: "induction",
+      entity_type: "induction_content",
+      entity_id: item.id,
+      entity_label: item.title,
+      reason: reason.slice(0, 1000),
+      before: snapshot,
+    });
 
     if (item.file_path && fs.existsSync(item.file_path)) {
       try {
@@ -842,6 +920,13 @@ router.post("/:id/save-quiz", authenticateAdmin, async (req, res) => {
       });
     }
 
+    await audit(req, {
+      action: "induction.quiz_save",
+      category: "induction",
+      entity_type: "induction_content",
+      entity_id: req.params.id,
+      details: { language, questions: numbered.length },
+    });
     res.json({
       success: true,
       message:
@@ -883,6 +968,14 @@ router.post("/:id/approve-quiz", authenticateAdmin, async (req, res) => {
     const item = await db("induction_content")
       .where({ id: req.params.id })
       .first();
+    await audit(req, {
+      action: "induction.quiz_approve",
+      category: "induction",
+      entity_type: "induction_content",
+      entity_id: req.params.id,
+      entity_label: item?.title,
+      details: { language, active_pool_total: total },
+    });
     res.json({
       success: true,
       message: `✅ Questions approved for "${item?.title}". Visitors will now receive these questions.`,
@@ -906,6 +999,13 @@ router.delete("/:id/quiz", authenticateAdmin, async (req, res) => {
 
     await rebuildActivePool(language);
 
+    await audit(req, {
+      action: "induction.quiz_delete",
+      category: "induction",
+      entity_type: "induction_content",
+      entity_id: req.params.id,
+      details: { language },
+    });
     res.json({ success: true, message: "Quiz questions removed." });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });

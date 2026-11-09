@@ -178,6 +178,27 @@ async function initializeDatabase() {
     t.timestamp("created_at").defaultTo(db.fn.now());
   });
 
+  // Append-only audit trail: who did what, when, from where, why, and what changed.
+  // Nothing in the app edits or deletes rows here.
+  await createIfMissing("audit_logs", (t) => {
+    t.increments("id").primary();
+    t.timestamp("created_at").defaultTo(db.fn.now()).index();
+    t.string("actor_type").notNullable().defaultTo("system"); // admin | visitor | system
+    t.integer("actor_id");
+    t.string("actor_name");
+    t.string("action").notNullable().index(); // e.g. visitor.update
+    t.string("category").notNullable().index(); // auth | visitor | visit | quiz | induction | system
+    t.string("entity_type");
+    t.string("entity_id");
+    t.string("entity_label");
+    t.text("reason");
+    t.text("before_data");
+    t.text("after_data");
+    t.text("details");
+    t.string("ip_address");
+    t.text("user_agent");
+  });
+
   await createIfMissing("qr_scans", (t) => {
     t.increments("id").primary();
     t.string("ip_address");

@@ -28,6 +28,7 @@ import VisitorsPage from "./pages/admin/VisitorsPage";
 import ReportsPage from "./pages/admin/ReportsPage";
 import QRCodePage from "./pages/admin/QRCodePage";
 import InductionManagerPage from "./pages/admin/InductionManagerPage";
+import AuditPage from "./pages/admin/AuditPage";
 
 // ─── PrivateRoute — redirects unauthenticated users to /admin/login ───────────
 function PrivateRoute({ children }) {
@@ -114,6 +115,7 @@ export default function App() {
                 <Route path="induction" element={<InductionManagerPage />} />
                 <Route path="reports" element={<ReportsPage />} />
                 <Route path="qr" element={<QRCodePage />} />
+                <Route path="audit" element={<AuditPage />} />
               </Route>
 
               {/* Fallback */}

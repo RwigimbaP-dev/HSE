@@ -7,6 +7,7 @@ const {
   issueVisitorToken,
 } = require("../middleware/auth");
 const { validate, registerRules } = require("../middleware/validate");
+const { audit, visitorActor } = require("../utils/audit");
 
 // ─── Helper: verify the token's visitor_id matches the request body ───────────
 function assertOwnership(req, res, visitor_id) {
@@ -20,52 +21,50 @@ function assertOwnership(req, res, visitor_id) {
   return true;
 }
 
-// ─── Helper: find a visitor by phone + ID number (public checkout) ───────────
+// ─── Helper: find the active visit for public checkout ───────────────────────
 // Checkout must work hours later, from any device, with no session token.
-// To stop strangers checking someone else out, the visitor must give the phone
-// number AND the ID/passport number they registered with (full, or last 4 chars).
-async function findVisitorForCheckout(phone, idNumber) {
+// The visitor identifies themselves with EITHER the phone number OR the
+// ID/passport number they registered with (if both are given, both must match).
+// A phone number matches on its digits (spaces / "+" ignored); an ID number must
+// match in full (case-insensitive).
+async function findActiveVisitForCheckout(phone, idNumber) {
   const digits = String(phone || "").replace(/\D/g, "");
   const id = String(idNumber || "")
     .trim()
     .toLowerCase();
-  if (digits.length < 7 || id.length < 4) return null;
+  if (!digits && !id) return null;
+  if (digits && digits.length < 7) return null;
+  if (id && id.length < 4) return null;
 
-  const candidates = await db("visitors").whereRaw(
-    "regexp_replace(phone, '\\D', '', 'g') = ?",
-    [digits],
-  );
+  let q = db("visitors");
+  if (digits)
+    q = q.whereRaw("regexp_replace(phone, '\\D', '', 'g') = ?", [digits]);
+  if (id) q = q.whereRaw("lower(trim(id_number)) = ?", [id]);
+  const candidates = await q.limit(20);
 
-  return (
-    candidates.find((v) => {
-      const stored = String(v.id_number || "")
-        .trim()
-        .toLowerCase();
-      return stored === id || (id.length >= 4 && stored.endsWith(id));
-    }) || null
-  );
+  // Prefer the candidate who is actually checked in
+  for (const visitor of candidates) {
+    const activeVisit = await db("visits")
+      .where({ visitor_id: visitor.id, status: "IN" })
+      .orderBy("check_in_time", "desc")
+      .first();
+    if (activeVisit) return { visitor, activeVisit };
+  }
+  return null;
 }
 
 const NOT_FOUND_MSG =
-  "No active visit found for these details. Check the phone and ID number you registered with.";
+  "No active visit found. Check the phone number or ID number you registered with.";
 
 // ─── POST /api/visitors/checkout/lookup (public, rate limited) ───────────────
 router.post("/checkout/lookup", async (req, res) => {
   try {
-    const visitor = await findVisitorForCheckout(
+    const found = await findActiveVisitForCheckout(
       req.body.phone,
       req.body.id_number,
     );
-    const activeVisit = visitor
-      ? await db("visits")
-          .where({ visitor_id: visitor.id, status: "IN" })
-          .orderBy("check_in_time", "desc")
-          .first()
-      : null;
-
-    if (!visitor || !activeVisit) {
+    if (!found)
       return res.status(404).json({ success: false, message: NOT_FOUND_MSG });
-    }
 
     // Only return what the checkout screen needs
     const {
@@ -76,7 +75,7 @@ router.post("/checkout/lookup", async (req, res) => {
       host_name,
       purpose,
       induction_status,
-    } = visitor;
+    } = found.visitor;
     res.json({
       success: true,
       visitor: {
@@ -88,7 +87,7 @@ router.post("/checkout/lookup", async (req, res) => {
         purpose,
         induction_status,
       },
-      activeVisit,
+      activeVisit: found.activeVisit,
     });
   } catch (err) {
     console.error("Checkout lookup error:", err);
@@ -101,18 +100,11 @@ router.post("/checkout/lookup", async (req, res) => {
 // ─── POST /api/visitors/checkout/confirm (public, rate limited) ──────────────
 router.post("/checkout/confirm", async (req, res) => {
   try {
-    const visitor = await findVisitorForCheckout(
+    const found = await findActiveVisitForCheckout(
       req.body.phone,
       req.body.id_number,
     );
-    const activeVisit = visitor
-      ? await db("visits")
-          .where({ visitor_id: visitor.id, status: "IN" })
-          .orderBy("check_in_time", "desc")
-          .first()
-      : null;
-
-    if (!visitor || !activeVisit) {
+    if (!found)
       return res
         .status(404)
         .json({
@@ -120,13 +112,31 @@ router.post("/checkout/confirm", async (req, res) => {
           message: NOT_FOUND_MSG,
           code: "NOT_CHECKED_IN",
         });
-    }
 
-    await db("visits").where({ id: activeVisit.id }).update({
+    await db("visits").where({ id: found.activeVisit.id }).update({
       check_out_time: new Date().toISOString(),
       status: "OUT",
     });
-    const visit = await db("visits").where({ id: activeVisit.id }).first();
+    const visit = await db("visits")
+      .where({ id: found.activeVisit.id })
+      .first();
+    await audit(req, {
+      actor: visitorActor(found.visitor),
+      action: "visit.check_out",
+      category: "visit",
+      entity_type: "visit",
+      entity_id: visit.id,
+      entity_label: `${found.visitor.first_name} ${found.visitor.last_name}`,
+      details: {
+        via: "check-out page",
+        identified_by: [
+          req.body.phone ? "phone" : null,
+          req.body.id_number ? "id number" : null,
+        ]
+          .filter(Boolean)
+          .join(" + "),
+      },
+    });
     res.json({ success: true, message: "Checked out successfully", visit });
   } catch (err) {
     console.error("Checkout confirm error:", err);
@@ -220,6 +230,21 @@ router.post("/register", validate(registerRules), async (req, res) => {
     }
 
     const visitor = await db("visitors").where({ id: visitorId }).first();
+
+    await audit(req, {
+      actor: visitorActor(visitor),
+      action: existingVisitor ? "visitor.re_register" : "visitor.register",
+      category: "visitor",
+      entity_type: "visitor",
+      entity_id: visitor.id,
+      entity_label: `${visitor.first_name} ${visitor.last_name} (${visitor.phone})`,
+      details: {
+        company: visitor.company,
+        host: visitor.host_name,
+        purpose: visitor.purpose,
+        language: visitor.language,
+      },
+    });
 
     // Issue a short-lived visitor session token
     const visitorToken = issueVisitorToken(visitorId, cleanPhone);
@@ -342,6 +367,15 @@ router.post("/checkin", authenticateVisitor, async (req, res) => {
     const visit = await db("visits")
       .where({ id: row?.id ?? row })
       .first();
+    await audit(req, {
+      actor: visitorActor(visitor),
+      action: "visit.check_in",
+      category: "visit",
+      entity_type: "visit",
+      entity_id: visit.id,
+      entity_label: `${visitor.first_name} ${visitor.last_name}`,
+      details: { host: visitor.host_name, company: visitor.company },
+    });
     res.json({
       success: true,
       message: "Checked in successfully",
@@ -393,6 +427,15 @@ router.post("/checkout", authenticateVisitor, async (req, res) => {
     const updatedVisit = await db("visits")
       .where({ id: activeVisit.id })
       .first();
+    await audit(req, {
+      actor: visitorActor(visitor),
+      action: "visit.check_out",
+      category: "visit",
+      entity_type: "visit",
+      entity_id: updatedVisit.id,
+      entity_label: `${visitor.first_name} ${visitor.last_name}`,
+      details: { via: "check-in screen" },
+    });
     res.json({
       success: true,
       message: "Checked out successfully",

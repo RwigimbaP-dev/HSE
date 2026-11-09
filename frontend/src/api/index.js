@@ -115,6 +115,15 @@ export const adminAPI = {
   exportExcel: () => api.get("/admin/export", { responseType: "blob" }),
   getDailyReport: (date) =>
     api.get("/admin/reports/daily", { params: { date } }),
+  // Visitor CRUD — update & delete require a reason
+  createVisitor: (data) => api.post("/admin/visitors", data),
+  updateVisitor: (id, data) => api.put(`/admin/visitors/${id}`, data),
+  deleteVisitor: (id, reason) =>
+    api.delete(`/admin/visitors/${id}`, { data: { reason } }),
+  // Audit trail (read-only)
+  getAudit: (params = {}) => api.get("/admin/audit", { params }),
+  exportAudit: (params = {}) =>
+    api.get("/admin/audit/export", { params, responseType: "blob" }),
 };
 
 // ─── Induction Content APIs ───────────────────────────────────────────────────
@@ -132,7 +141,7 @@ export const inductionAPI = {
       timeout: 120000,
     }),
   update: (id, data) => api.put(`/induction/${id}`, data),
-  delete: (id) => api.delete(`/induction/${id}`),
+  delete: (id, reason) => api.delete(`/induction/${id}`, { data: { reason } }),
   fileUrl: (id) => `/api/induction/file/${id}`,
   extractPdf: (id) => api.post(`/induction/${id}/extract`),
   // Quiz management

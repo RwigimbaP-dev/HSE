@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { useLanguage } from "../../context/LanguageContext";
 import { inductionAPI } from "../../api";
 import Spinner from "../../components/Spinner";
+import ReasonModal from "../../components/ReasonModal";
 import toast from "react-hot-toast";
 
 const TYPE_ICONS = { video_url: "🎬", video_upload: "📹", pdf: "📄" };
@@ -891,16 +892,20 @@ export default function InductionManagerPage() {
     }
   };
 
-  const handleDelete = async (item) => {
-    if (!window.confirm(`Delete "${item.title}"? This cannot be undone.`))
-      return;
+  const [deleteTarget, setDeleteTarget] = useState(null);
+
+  const handleDelete = (item) => setDeleteTarget(item);
+
+  const confirmDelete = async (reason) => {
+    const item = deleteTarget;
     setDeleting(item.id);
     try {
-      await inductionAPI.delete(item.id);
+      await inductionAPI.delete(item.id, reason);
       toast.success("Deleted");
+      setDeleteTarget(null);
       load();
-    } catch {
-      toast.error("Delete failed");
+    } catch (err) {
+      toast.error(err.response?.data?.message || "Delete failed");
     } finally {
       setDeleting(null);
     }
@@ -914,6 +919,21 @@ export default function InductionManagerPage() {
 
   return (
     <div>
+      <ReasonModal
+        open={!!deleteTarget}
+        danger
+        title="Delete induction content"
+        message={
+          deleteTarget
+            ? `Delete "${deleteTarget.title}"? Its file and quiz questions are removed. This cannot be undone.`
+            : ""
+        }
+        confirmLabel="Delete"
+        loading={deleting !== null}
+        onConfirm={confirmDelete}
+        onCancel={() => setDeleteTarget(null)}
+      />
+
       {/* Header */}
       <div
         style={{

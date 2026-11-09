@@ -44,7 +44,7 @@ export default function CheckOutPage() {
 
   const handleSearch = async (e) => {
     e.preventDefault();
-    if (!phone.trim() || !idNumber.trim()) return;
+    if (!phone.trim() && !idNumber.trim()) return;
     setSearching(true);
     try {
       const res = await visitorAPI.checkoutLookup(
@@ -125,7 +125,6 @@ export default function CheckOutPage() {
               <div className="form-group">
                 <label className="form-label">
                   📞 {t("checkout_phone_label")}
-                  <span className="required-mark"> *</span>
                 </label>
                 <input
                   type="tel"
@@ -137,11 +136,20 @@ export default function CheckOutPage() {
                 />
               </div>
 
+              <div
+                style={{
+                  textAlign: "center",
+                  color: "var(--gray-400)",
+                  fontSize: "0.8rem",
+                  fontWeight: 700,
+                  margin: "-4px 0 12px",
+                }}
+              >
+                — OR —
+              </div>
+
               <div className="form-group">
-                <label className="form-label">
-                  🪪 {t("reg_id_number")}
-                  <span className="required-mark"> *</span>
-                </label>
+                <label className="form-label">🪪 {t("reg_id_number")}</label>
                 <input
                   type="text"
                   value={idNumber}
@@ -150,15 +158,15 @@ export default function CheckOutPage() {
                   autoComplete="off"
                 />
                 <span className="form-hint">
-                  The ID / passport number you registered with (or its last 4
-                  characters)
+                  Fill in just one: your phone number OR your full ID / passport
+                  number
                 </span>
               </div>
 
               <button
                 type="submit"
                 className="btn btn-primary btn-lg btn-full"
-                disabled={searching || !phone.trim() || !idNumber.trim()}
+                disabled={searching || (!phone.trim() && !idNumber.trim())}
               >
                 {searching ? <Spinner size="sm" /> : <span>🔍</span>}
                 {t("checkout_find_btn")}
