@@ -1277,6 +1277,18 @@ export default function InductionManagerPage() {
                           : ""}
                       </span>
                     )}
+                    {item.file_missing && (
+                      <span
+                        style={{
+                          fontSize: "0.75rem",
+                          fontWeight: 700,
+                          color: "var(--danger)",
+                        }}
+                      >
+                        ⚠ File is missing on the server — delete this item and
+                        upload it again (or use a YouTube link)
+                      </span>
+                    )}
                     <span
                       style={{ fontSize: "0.75rem", color: "var(--gray-400)" }}
                     >
@@ -1588,7 +1600,17 @@ export default function InductionManagerPage() {
                             color: "var(--gray-400)",
                           }}
                         >
-                          PDF, MP4, WebM, MOV
+                          PDF or MP4 (H.264) — plays on every phone. Avoid AVI /
+                          MOV.
+                        </p>
+                        <p
+                          style={{
+                            fontSize: "0.75rem",
+                            color: "var(--gray-400)",
+                          }}
+                        >
+                          Tip: a YouTube (unlisted) link is more reliable than
+                          uploading a video.
                         </p>
                       </div>
                     )}

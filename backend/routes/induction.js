@@ -270,8 +270,13 @@ router.get("/active", async (req, res) => {
 
     const processed = content.map((item) => ({
       ...item,
-      embed_url: item.type === "video_url" ? getEmbedUrl(item.url) : null,
+      embed_url: item.type === "video_url" ? parseVideoUrl(item.url).url : null,
+      embed_kind:
+        item.type === "video_url" ? parseVideoUrl(item.url).kind : null,
       file_url: item.file_path ? `/api/induction/file/${item.id}` : null,
+      // Render's free plan wipes uploaded files when the server restarts
+      file_missing:
+        !!item.file_path && !fs.existsSync(path.resolve(item.file_path)),
     }));
 
     res.json({ success: true, content: processed, total: processed.length });
@@ -300,44 +305,61 @@ router.get("/file/:id", async (req, res) => {
         .json({ success: false, message: "File missing on disk" });
     }
 
-    const stat = fs.statSync(filePath);
-    const fileSize = stat.size;
-    const range = req.headers.range;
+    const fileSize = fs.statSync(filePath).size;
+    const mime = item.mime_type || "application/octet-stream";
+    const isMedia = mime.startsWith("video/") || mime.startsWith("audio/");
 
-    res.setHeader("X-Frame-Options", "SAMEORIGIN");
     res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
     res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("Content-Type", mime);
+    // iPhones / Safari refuse to play video unless the server says it supports ranges
+    res.setHeader("Accept-Ranges", "bytes");
+    res.setHeader("Cache-Control", "public, max-age=3600");
+    res.setHeader(
+      "Content-Disposition",
+      `inline; filename="${encodeURIComponent(item.file_name || "file")}"`,
+    );
 
-    if (range && item.mime_type?.startsWith("video/")) {
-      const parts = range.replace(/bytes=/, "").split("-");
-      const start = parseInt(parts[0], 10);
-      const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
-      const chunkSize = end - start + 1;
-      const fileStream = fs.createReadStream(filePath, { start, end });
+    const range = req.headers.range;
+    let status = 200;
+    let start = 0;
+    let end = fileSize - 1;
 
-      res.writeHead(206, {
-        "Content-Range": `bytes ${start}-${end}/${fileSize}`,
-        "Accept-Ranges": "bytes",
-        "Content-Length": chunkSize,
-        "Content-Type": item.mime_type,
-        "X-Frame-Options": "SAMEORIGIN",
-        "Cross-Origin-Resource-Policy": "cross-origin",
-      });
-      fileStream.pipe(res);
-    } else {
-      res.setHeader(
-        "Content-Type",
-        item.mime_type || "application/octet-stream",
-      );
-      res.setHeader("Content-Length", fileSize);
-      res.setHeader(
-        "Content-Disposition",
-        `inline; filename="${encodeURIComponent(item.file_name)}"`,
-      );
-      fs.createReadStream(filePath).pipe(res);
+    if (range && isMedia) {
+      // Formats: "bytes=500-999", "bytes=500-" and "bytes=-500" (last 500 bytes)
+      const m = /^bytes=(\d*)-(\d*)$/.exec(range.trim());
+      if (!m || (m[1] === "" && m[2] === "")) {
+        res.setHeader("Content-Range", `bytes */${fileSize}`);
+        return res.status(416).end();
+      }
+      if (m[1] === "") {
+        start = Math.max(0, fileSize - parseInt(m[2], 10));
+      } else {
+        start = parseInt(m[1], 10);
+        if (m[2] !== "") end = Math.min(parseInt(m[2], 10), fileSize - 1);
+      }
+      if (start > end || start >= fileSize) {
+        res.setHeader("Content-Range", `bytes */${fileSize}`);
+        return res.status(416).end();
+      }
+      status = 206;
+      res.setHeader("Content-Range", `bytes ${start}-${end}/${fileSize}`);
     }
+
+    res.status(status);
+    res.setHeader("Content-Length", end - start + 1);
+    if (req.method === "HEAD") return res.end();
+
+    const stream = fs.createReadStream(filePath, { start, end });
+    stream.on("error", (e) => {
+      console.warn("File stream error:", e.message);
+      res.destroy();
+    });
+    res.on("close", () => stream.destroy()); // visitor skipped ahead / closed the tab
+    stream.pipe(res);
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    if (!res.headersSent)
+      res.status(500).json({ success: false, message: err.message });
   }
 });
 
@@ -351,7 +373,11 @@ router.get("/", authenticateAdmin, async (req, res) => {
     const processed = content.map((item) => ({
       ...item,
       file_url: item.file_path ? `/api/induction/file/${item.id}` : null,
-      embed_url: item.type === "video_url" ? getEmbedUrl(item.url) : null,
+      embed_url: item.type === "video_url" ? parseVideoUrl(item.url).url : null,
+      embed_kind:
+        item.type === "video_url" ? parseVideoUrl(item.url).kind : null,
+      file_missing:
+        !!item.file_path && !fs.existsSync(path.resolve(item.file_path)),
       // Include content extraction status for the admin UI
       has_content_text: !!(item.content_text && item.content_text.trim()),
       has_key_points: !!(item.key_points && item.key_points.trim()),
@@ -582,12 +608,10 @@ router.post("/:id/extract", authenticateAdmin, async (req, res) => {
     if (!item)
       return res.status(404).json({ success: false, message: "Not found" });
     if (item.type !== "pdf" || !item.file_path) {
-      return res
-        .status(400)
-        .json({
-          success: false,
-          message: "Only PDF files support text extraction",
-        });
+      return res.status(400).json({
+        success: false,
+        message: "Only PDF files support text extraction",
+      });
     }
 
     const filePath = path.resolve(item.file_path);
@@ -694,13 +718,11 @@ router.delete("/:id", authenticateAdmin, async (req, res) => {
   try {
     const reason = String(req.body?.reason || "").trim();
     if (reason.length < 5) {
-      return res
-        .status(400)
-        .json({
-          success: false,
-          code: "REASON_REQUIRED",
-          message: "A reason (at least 5 characters) is required.",
-        });
+      return res.status(400).json({
+        success: false,
+        code: "REASON_REQUIRED",
+        message: "A reason (at least 5 characters) is required.",
+      });
     }
 
     const item = await db("induction_content")
@@ -733,24 +755,67 @@ router.delete("/:id", authenticateAdmin, async (req, res) => {
   }
 });
 
-// ─── Helper: convert YouTube/Vimeo to embed URL ──────────────────────────────
-function getEmbedUrl(url) {
-  if (!url) return null;
+// ─── Helper: turn a pasted video link into something a browser can play ──────
+// Returns { url, kind } where kind = youtube | vimeo | drive | file | other.
+//   youtube / vimeo / drive → shown in an <iframe>
+//   file                    → a direct .mp4/.webm/.ogg link, shown in a <video> tag
+function parseVideoUrl(raw) {
+  const input = String(raw || "").trim();
+  if (!input) return { url: null, kind: "other" };
   try {
-    const ytMatch = url.match(
-      /(?:youtube\.com\/(?:watch\?v=|embed\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})/,
-    );
-    if (ytMatch)
-      return `https://www.youtube.com/embed/${ytMatch[1]}?rel=0&modestbranding=1`;
+    const u = new URL(/^https?:\/\//i.test(input) ? input : `https://${input}`);
+    const host = u.hostname.replace(/^(www\.|m\.)/, "");
 
-    const vimeoMatch = url.match(/vimeo\.com\/(?:video\/)?(\d+)/);
-    if (vimeoMatch) return `https://player.vimeo.com/video/${vimeoMatch[1]}`;
+    // ── YouTube: watch?v=, youtu.be/, /embed/, /shorts/, /live/ ──
+    let ytId = null;
+    if (host === "youtu.be") ytId = u.pathname.split("/")[1];
+    else if (host === "youtube.com" || host === "youtube-nocookie.com") {
+      if (u.searchParams.get("v")) ytId = u.searchParams.get("v");
+      else {
+        const m = u.pathname.match(/^\/(?:embed|shorts|live|v)\/([^/?#]+)/);
+        if (m) ytId = m[1];
+      }
+    }
+    if (ytId && /^[A-Za-z0-9_-]{11}$/.test(ytId)) {
+      return {
+        url: `https://www.youtube.com/embed/${ytId}?rel=0&modestbranding=1&playsinline=1`,
+        kind: "youtube",
+      };
+    }
 
-    return url;
+    // ── Vimeo (including private links with a hash: vimeo.com/123/abcdef) ──
+    if (host === "vimeo.com" || host === "player.vimeo.com") {
+      const m = u.pathname.match(/\/(?:video\/)?(\d+)(?:\/([a-z0-9]+))?/i);
+      if (m) {
+        const hash = u.searchParams.get("h") || m[2];
+        return {
+          url: `https://player.vimeo.com/video/${m[1]}${hash ? `?h=${hash}` : ""}`,
+          kind: "vimeo",
+        };
+      }
+    }
+
+    // ── Google Drive share link ──
+    if (host === "drive.google.com") {
+      const m = u.pathname.match(/\/file\/d\/([^/]+)/);
+      const id = m ? m[1] : u.searchParams.get("id");
+      if (id)
+        return {
+          url: `https://drive.google.com/file/d/${id}/preview`,
+          kind: "drive",
+        };
+    }
+
+    // ── Direct video file ──
+    if (/\.(mp4|webm|ogg|ogv|m4v|mov)$/i.test(u.pathname))
+      return { url: u.toString(), kind: "file" };
+
+    return { url: u.toString(), kind: "other" };
   } catch {
-    return url;
+    return { url: input, kind: "other" };
   }
 }
+const getEmbedUrl = (url) => parseVideoUrl(url).url;
 
 // ─── Helper: rebuild active_quiz_pool for a language from all approved quizzes ─
 async function rebuildActivePool(language) {

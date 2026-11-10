@@ -4,7 +4,7 @@ import { useLanguage } from "../../context/LanguageContext";
 import ProgressBar from "../../components/ProgressBar";
 import Spinner from "../../components/Spinner";
 import PdfViewer from "../../components/PdfViewer";
-import { inductionAPI } from "../../api";
+import { inductionAPI, assetUrl } from "../../api";
 
 const STEPS_EN = ["Register", "HSE Video", "Assessment", "Check-In"];
 const STEPS_FR = ["Inscription", "Vidéo HSE", "Évaluation", "Entrée"];
@@ -177,6 +177,83 @@ function getBuiltInSlides(t, lang) {
       ],
     },
   ];
+}
+
+// Plays an uploaded video or a direct video link. Uses src on <video> itself
+// (not <source>) so that load errors are reported and we can show a helpful message.
+function VideoFile({ src, title, onViewed }) {
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    setFailed(false);
+  }, [src]);
+
+  // A broken video must not lock the visitor out of the site
+  useEffect(() => {
+    if (failed) onViewed?.();
+  }, [failed]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  if (failed) {
+    return (
+      <div
+        style={{
+          borderRadius: 12,
+          background: "var(--warning-bg)",
+          border: "1px solid #fbd38d",
+          padding: 18,
+          marginBottom: 12,
+          textAlign: "center",
+        }}
+      >
+        <div style={{ fontSize: "1.5rem" }}>⚠️</div>
+        <p
+          style={{
+            fontSize: "0.9rem",
+            color: "var(--warning)",
+            margin: "6px 0 10px",
+          }}
+        >
+          This video could not be played on this device. Please ask the safety
+          officer, or try opening it directly.
+        </p>
+        <a
+          href={src}
+          target="_blank"
+          rel="noreferrer"
+          className="btn btn-ghost btn-sm"
+        >
+          ↗ Open video
+        </a>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      style={{
+        borderRadius: 12,
+        overflow: "hidden",
+        background: "#000",
+        marginBottom: 12,
+      }}
+    >
+      <video
+        key={src}
+        src={src}
+        title={title}
+        controls
+        playsInline
+        preload="metadata"
+        style={{ width: "100%", maxHeight: 380, display: "block" }}
+        onError={() => setFailed(true)}
+        onPlay={onViewed}
+        onEnded={onViewed}
+        onTimeUpdate={(e) => {
+          const { currentTime, duration } = e.target;
+          if (duration && currentTime / duration >= 0.8) onViewed?.();
+        }}
+      />
+    </div>
+  );
 }
 
 export default function InductionPage() {
@@ -424,65 +501,85 @@ export default function InductionPage() {
                     </div>
                   )}
 
-                  {/* Video URL (YouTube / Vimeo embed) */}
+                  {/* Video link: YouTube / Vimeo / Google Drive (iframe) or a direct file (<video>) */}
                   {currentAdminItem.type === "video_url" &&
-                    currentAdminItem.embed_url && (
-                      <div
-                        style={{
-                          position: "relative",
-                          paddingBottom: "56.25%",
-                          borderRadius: 12,
-                          overflow: "hidden",
-                          background: "#000",
-                          marginBottom: 12,
-                        }}
-                      >
-                        <iframe
-                          src={currentAdminItem.embed_url}
-                          title={currentAdminItem.title}
+                    currentAdminItem.embed_url &&
+                    (currentAdminItem.embed_kind === "file" ? (
+                      <VideoFile
+                        src={currentAdminItem.embed_url}
+                        title={currentAdminItem.title}
+                        onViewed={() => markAdminItemViewed(currentIndex)}
+                      />
+                    ) : (
+                      <div style={{ marginBottom: 12 }}>
+                        <div
                           style={{
-                            position: "absolute",
-                            inset: 0,
-                            width: "100%",
-                            height: "100%",
-                            border: "none",
+                            position: "relative",
+                            paddingBottom: "56.25%",
+                            borderRadius: 12,
+                            overflow: "hidden",
+                            background: "#000",
                           }}
-                          allowFullScreen
-                          onLoad={() => markAdminItemViewed(currentIndex)}
-                        />
+                        >
+                          <iframe
+                            src={currentAdminItem.embed_url}
+                            title={currentAdminItem.title}
+                            style={{
+                              position: "absolute",
+                              inset: 0,
+                              width: "100%",
+                              height: "100%",
+                              border: "none",
+                            }}
+                            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share; fullscreen"
+                            referrerPolicy="strict-origin-when-cross-origin"
+                            allowFullScreen
+                            onLoad={() => markAdminItemViewed(currentIndex)}
+                          />
+                        </div>
+                        <div style={{ textAlign: "right", marginTop: 6 }}>
+                          <a
+                            href={
+                              currentAdminItem.url || currentAdminItem.embed_url
+                            }
+                            target="_blank"
+                            rel="noreferrer"
+                            style={{
+                              fontSize: "0.8rem",
+                              color: "var(--gray-500)",
+                            }}
+                          >
+                            Video not showing? ↗ Open it in a new tab
+                          </a>
+                        </div>
                       </div>
-                    )}
+                    ))}
 
                   {/* Uploaded video */}
                   {currentAdminItem.type === "video_upload" &&
-                    currentAdminItem.file_url && (
+                    (currentAdminItem.file_missing ? (
                       <div
                         style={{
                           borderRadius: 12,
-                          overflow: "hidden",
-                          background: "#000",
+                          background: "var(--warning-bg)",
+                          border: "1px solid #fbd38d",
+                          padding: 18,
                           marginBottom: 12,
+                          textAlign: "center",
+                          color: "var(--warning)",
+                          fontSize: "0.9rem",
                         }}
                       >
-                        <video
-                          controls
-                          style={{
-                            width: "100%",
-                            maxHeight: 380,
-                            display: "block",
-                          }}
-                          onPlay={() => markAdminItemViewed(currentIndex)}
-                          onTimeUpdate={(e) => {
-                            const { currentTime, duration } = e.target;
-                            if (duration && currentTime / duration >= 0.8)
-                              markAdminItemViewed(currentIndex);
-                          }}
-                        >
-                          <source src={currentAdminItem.file_url} />
-                          Your browser does not support the video tag.
-                        </video>
+                        ⚠️ This video is temporarily unavailable. Please ask the
+                        safety officer for assistance.
                       </div>
-                    )}
+                    ) : currentAdminItem.file_url ? (
+                      <VideoFile
+                        src={assetUrl(currentAdminItem.file_url)}
+                        title={currentAdminItem.title}
+                        onViewed={() => markAdminItemViewed(currentIndex)}
+                      />
+                    ) : null)}
 
                   {/* PDF document — use PdfViewer which fetches via blob URL to avoid CSP/COEP blocks */}
                   {currentAdminItem.type === "pdf" &&
@@ -496,7 +593,7 @@ export default function InductionPage() {
                         }}
                       >
                         <PdfViewer
-                          src={currentAdminItem.file_url}
+                          src={assetUrl(currentAdminItem.file_url)}
                           title={currentAdminItem.title}
                           height={480}
                           onLoad={() => markAdminItemViewed(currentIndex)}
@@ -520,7 +617,7 @@ export default function InductionPage() {
                             📄 {currentAdminItem.file_name}
                           </span>
                           <a
-                            href={currentAdminItem.file_url}
+                            href={assetUrl(currentAdminItem.file_url)}
                             target="_blank"
                             rel="noreferrer"
                             className="btn btn-ghost btn-sm"

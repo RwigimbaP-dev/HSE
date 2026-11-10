@@ -1,8 +1,19 @@
 import axios from "axios";
 
+// Optional: set VITE_API_URL (e.g. https://my-backend.onrender.com) on Vercel to talk to the
+// backend directly instead of through Vercel's /api proxy. This is the most reliable way to
+// stream large videos and upload big files. Leave it unset to keep using the proxy.
+const API_ORIGIN = (import.meta.env.VITE_API_URL || "")
+  .trim()
+  .replace(/\/+$/, "");
+
+/** Turn "/api/induction/file/3" into a full URL when a direct backend URL is configured. */
+export const assetUrl = (path) =>
+  path && path.startsWith("/") ? `${API_ORIGIN}${path}` : path;
+
 // ─── Axios instance ───────────────────────────────────────────────────────────
 const api = axios.create({
-  baseURL: "/api",
+  baseURL: `${API_ORIGIN}/api`,
   timeout: 60000, // Render's free server can take ~30-60 s to wake up after idling
   headers: { "Content-Type": "application/json" },
 });
