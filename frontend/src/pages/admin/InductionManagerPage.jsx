@@ -866,7 +866,11 @@ export default function InductionManagerPage() {
           ([k, v]) => v != null && fd.append(k, v),
         );
         const res = await inductionAPI.upload(fd);
-        toast.success("File uploaded successfully");
+        if (res.data.stored_in_cloud)
+          toast.success("☁️ File uploaded and saved permanently");
+        else toast.success("File uploaded");
+        if (res.data.warning)
+          toast(`⚠️ ${res.data.warning}`, { duration: 12000 });
         if (res.data.contentExtracted)
           toast.success("📄 PDF text extracted for quiz generation", {
             duration: 5000,
@@ -1275,6 +1279,13 @@ export default function InductionManagerPage() {
                         {item.file_size
                           ? `(${formatSize(item.file_size)})`
                           : ""}
+                      </span>
+                    )}
+                    {item.stored_in_cloud && (
+                      <span
+                        style={{ fontSize: "0.75rem", color: "var(--success)" }}
+                      >
+                        ☁️ Saved permanently
                       </span>
                     )}
                     {item.file_missing && (

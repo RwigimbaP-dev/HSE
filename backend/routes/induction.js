@@ -6,6 +6,7 @@ const multer = require("multer");
 const { db } = require("../database/schema");
 const { authenticateAdmin } = require("../middleware/auth");
 const { audit, diffObjects } = require("../utils/audit");
+const cloud = require("../utils/cloudStorage");
 
 // ─── PDF text extraction (lazy-loaded) ───────────────────────────────────────
 let pdfParse = null;
@@ -200,6 +201,20 @@ Respond ONLY with valid JSON (no markdown, no extra text):
   return null;
 }
 
+// ─── Helper: where the browser should load an uploaded file from ──────────────
+// Cloud files (Cloudinary) have an https URL; old disk files go through our own route.
+const isCloud = (item) => !!item.cloud_public_id;
+const fileUrlFor = (item) =>
+  isCloud(item)
+    ? item.url
+    : item.file_path
+      ? `/api/induction/file/${item.id}`
+      : null;
+const fileMissing = (item) =>
+  !isCloud(item) &&
+  !!item.file_path &&
+  !fs.existsSync(path.resolve(item.file_path));
+
 // ─── Induction settings ───────────────────────────────────────────────────────
 // min_watch_percent = how much of the induction content a visitor must view
 // before the "Proceed to quiz" button unlocks (0–100).
@@ -273,10 +288,10 @@ router.get("/active", async (req, res) => {
       embed_url: item.type === "video_url" ? parseVideoUrl(item.url).url : null,
       embed_kind:
         item.type === "video_url" ? parseVideoUrl(item.url).kind : null,
-      file_url: item.file_path ? `/api/induction/file/${item.id}` : null,
+      file_url: fileUrlFor(item),
       // Render's free plan wipes uploaded files when the server restarts
-      file_missing:
-        !!item.file_path && !fs.existsSync(path.resolve(item.file_path)),
+      file_missing: fileMissing(item),
+      stored_in_cloud: isCloud(item),
     }));
 
     res.json({ success: true, content: processed, total: processed.length });
@@ -292,6 +307,7 @@ router.get("/file/:id", async (req, res) => {
     const item = await db("induction_content")
       .where({ id: req.params.id })
       .first();
+    if (item && isCloud(item) && item.url) return res.redirect(302, item.url);
     if (!item || !item.file_path) {
       return res
         .status(404)
@@ -372,12 +388,12 @@ router.get("/", authenticateAdmin, async (req, res) => {
 
     const processed = content.map((item) => ({
       ...item,
-      file_url: item.file_path ? `/api/induction/file/${item.id}` : null,
+      file_url: fileUrlFor(item),
       embed_url: item.type === "video_url" ? parseVideoUrl(item.url).url : null,
       embed_kind:
         item.type === "video_url" ? parseVideoUrl(item.url).kind : null,
-      file_missing:
-        !!item.file_path && !fs.existsSync(path.resolve(item.file_path)),
+      file_missing: fileMissing(item),
+      stored_in_cloud: isCloud(item),
       // Include content extraction status for the admin UI
       has_content_text: !!(item.content_text && item.content_text.trim()),
       has_key_points: !!(item.key_points && item.key_points.trim()),
@@ -482,13 +498,39 @@ router.post(
         }
       }
 
+      // Permanent storage: move the file to the cloud when it is configured
+      let stored = null;
+      let uploadWarning = null;
+      if (cloud.isEnabled()) {
+        try {
+          stored = await cloud.uploadFile({
+            filePath: req.file.path,
+            resourceType: fileType === "pdf" ? "raw" : "video",
+            fileName: req.file.originalname,
+          });
+          try {
+            fs.unlinkSync(req.file.path);
+          } catch {}
+          console.log(`  ☁ Uploaded to cloud storage: ${stored.publicId}`);
+        } catch (e) {
+          console.error("Cloud upload failed:", e.message);
+          uploadWarning = `Could not save to permanent cloud storage (${e.message}). The file was kept on the server disk and may disappear when the server restarts.`;
+        }
+      } else {
+        uploadWarning =
+          "Cloud storage is not set up, so this file is stored on the server disk and will disappear when the server restarts. Add the Cloudinary settings to keep files permanently.";
+      }
+
       const [id] = await db("induction_content")
         .insert({
           title,
           description: description || null,
           type: fileType,
           language,
-          file_path: req.file.path,
+          file_path: stored ? null : req.file.path,
+          url: stored ? stored.url : null,
+          cloud_public_id: stored ? stored.publicId : null,
+          cloud_resource_type: stored ? stored.resourceType : null,
           file_name: req.file.originalname,
           file_size: req.file.size,
           mime_type: req.file.mimetype,
@@ -519,10 +561,12 @@ router.post(
         success: true,
         content: {
           ...item,
-          file_url: `/api/induction/file/${item.id}`,
+          file_url: fileUrlFor(item),
           has_content_text: !!(contentText && contentText.trim()),
         },
         contentExtracted: !!contentText,
+        stored_in_cloud: !!stored,
+        warning: uploadWarning,
       });
     } catch (err) {
       console.error("Upload error:", err);
@@ -558,7 +602,7 @@ router.put("/:id", authenticateAdmin, async (req, res) => {
     if (title !== undefined) updates.title = title;
     if (description !== undefined) updates.description = description;
     if (language !== undefined) updates.language = language;
-    if (url !== undefined) updates.url = url;
+    if (url !== undefined && item.type === "video_url") updates.url = url;
     if (duration_seconds !== undefined)
       updates.duration_seconds = duration_seconds;
     if (sort_order !== undefined) updates.sort_order = parseInt(sort_order, 10);
@@ -607,11 +651,22 @@ router.post("/:id/extract", authenticateAdmin, async (req, res) => {
       .first();
     if (!item)
       return res.status(404).json({ success: false, message: "Not found" });
-    if (item.type !== "pdf" || !item.file_path) {
-      return res.status(400).json({
-        success: false,
-        message: "Only PDF files support text extraction",
-      });
+    if (item.type !== "pdf" || (!item.file_path && !isCloud(item))) {
+      return res
+        .status(400)
+        .json({
+          success: false,
+          message: "Only PDF files support text extraction",
+        });
+    }
+    if (isCloud(item)) {
+      return res
+        .status(400)
+        .json({
+          success: false,
+          message:
+            "Text was extracted when this PDF was uploaded. To re-extract, delete it and upload the PDF again.",
+        });
     }
 
     const filePath = path.resolve(item.file_path);
@@ -718,11 +773,13 @@ router.delete("/:id", authenticateAdmin, async (req, res) => {
   try {
     const reason = String(req.body?.reason || "").trim();
     if (reason.length < 5) {
-      return res.status(400).json({
-        success: false,
-        code: "REASON_REQUIRED",
-        message: "A reason (at least 5 characters) is required.",
-      });
+      return res
+        .status(400)
+        .json({
+          success: false,
+          code: "REASON_REQUIRED",
+          message: "A reason (at least 5 characters) is required.",
+        });
     }
 
     const item = await db("induction_content")
@@ -747,6 +804,8 @@ router.delete("/:id", authenticateAdmin, async (req, res) => {
         fs.unlinkSync(item.file_path);
       } catch {}
     }
+    if (isCloud(item))
+      await cloud.deleteFile(item.cloud_public_id, item.cloud_resource_type);
 
     await db("induction_content").where({ id: req.params.id }).delete();
     res.json({ success: true, message: "Induction content deleted" });

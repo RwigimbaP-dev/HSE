@@ -149,7 +149,7 @@ export const inductionAPI = {
   upload: (formData) =>
     api.post("/induction/upload", formData, {
       headers: { "Content-Type": "multipart/form-data" },
-      timeout: 120000,
+      timeout: 600000, // big videos: phone → server → cloud can take several minutes
     }),
   update: (id, data) => api.put(`/induction/${id}`, data),
   delete: (id, reason) => api.delete(`/induction/${id}`, { data: { reason } }),

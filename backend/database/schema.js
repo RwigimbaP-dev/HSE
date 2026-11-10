@@ -249,6 +249,17 @@ async function initializeDatabase() {
     console.log("  ✔ Added column: induction_content.key_points");
   }
 
+  // Cloud-stored uploads (Cloudinary) — files here survive server restarts
+  for (const [col, label] of [
+    ["cloud_public_id", "cloud_public_id"],
+    ["cloud_resource_type", "cloud_resource_type"],
+  ]) {
+    if (!(await db.schema.hasColumn("induction_content", col))) {
+      await db.schema.table("induction_content", (t) => t.string(col));
+      console.log(`  ✔ Added column: induction_content.${label}`);
+    }
+  }
+
   // ── AI-generated quiz questions cache ──────────────────────────────────────
   // Stores generated question sets so retries within the same session are consistent
   await createIfMissing("quiz_question_cache", (t) => {
