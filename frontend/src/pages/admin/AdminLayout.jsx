@@ -25,6 +25,12 @@ const NAV_ITEMS = [
     path: "/admin/induction",
   },
   {
+    id: "questions",
+    icon: "❓",
+    label: "Quiz Questions",
+    path: "/admin/questions",
+  },
+  {
     id: "reports",
     icon: "📋",
     labelKey: "admin_reports",

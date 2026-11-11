@@ -178,6 +178,41 @@ async function initializeDatabase() {
     t.timestamp("created_at").defaultTo(db.fn.now());
   });
 
+  // Admin-written quiz question bank (questions + answer options)
+  await createIfMissing("quiz_questions", (t) => {
+    t.increments("id").primary();
+    t.string("language").notNullable().defaultTo("all").index(); // en | fr | rw | all
+    t.text("question_text").notNullable();
+    t.text("explanation");
+    t.boolean("is_active").notNullable().defaultTo(true);
+    t.integer("sort_order").defaultTo(0);
+    t.integer("created_by")
+      .references("id")
+      .inTable("admins")
+      .onDelete("SET NULL");
+    t.timestamp("created_at").defaultTo(db.fn.now());
+    t.timestamp("updated_at").defaultTo(db.fn.now());
+  });
+
+  await createIfMissing("quiz_options", (t) => {
+    t.increments("id").primary();
+    t.integer("question_id")
+      .notNullable()
+      .references("id")
+      .inTable("quiz_questions")
+      .onDelete("CASCADE")
+      .index();
+    t.text("option_text").notNullable();
+    t.boolean("is_correct").notNullable().defaultTo(false);
+    t.integer("sort_order").defaultTo(0);
+  });
+
+  // One quiz, all languages: translations of each question are kept as JSON on the question
+  if (!(await db.schema.hasColumn("quiz_questions", "translations"))) {
+    await db.schema.table("quiz_questions", (t) => t.text("translations"));
+    console.log("  ✔ Added column: quiz_questions.translations");
+  }
+
   // Append-only audit trail: who did what, when, from where, why, and what changed.
   // Nothing in the app edits or deletes rows here.
   await createIfMissing("audit_logs", (t) => {

@@ -108,6 +108,23 @@ export const wakeServer = () => {
 };
 
 // ─── Quiz APIs ────────────────────────────────────────────────────────────────
+export const questionsAPI = {
+  getAll: (params = {}) => api.get("/questions", { params }),
+  getSettings: () => api.get("/questions/settings"),
+  updateSettings: (question_count, pass_score) =>
+    api.put("/questions/settings", { question_count, pass_score }),
+  create: (data) => api.post("/questions", data),
+  update: (id, data) => api.put(`/questions/${id}`, data),
+  toggle: (id) => api.post(`/questions/${id}/toggle`),
+  remove: (id, reason) => api.delete(`/questions/${id}`, { data: { reason } }),
+  translate: (id, languages) =>
+    api.post(`/questions/${id}/translate`, { languages }, { timeout: 120000 }),
+  translateMissing: () =>
+    api.post("/questions/translate-missing", {}, { timeout: 180000 }),
+  saveTranslation: (id, lang, data) =>
+    api.put(`/questions/${id}/translations/${lang}`, data),
+};
+
 export const quizAPI = {
   generate: (visitor_id, language) =>
     api.get("/quiz/generate", { params: { visitor_id, language } }),
@@ -142,6 +159,7 @@ export const inductionAPI = {
   getActive: (language) =>
     api.get("/induction/active", { params: { language } }),
   getSettings: () => api.get("/induction/settings"),
+  storageStatus: () => api.get("/induction/storage-status", { timeout: 30000 }),
   updateSettings: (min_watch_percent) =>
     api.put("/induction/settings", { min_watch_percent }),
   getAll: () => api.get("/induction"),

@@ -172,6 +172,7 @@ app.use("/api/quiz/", quizLimiter);
 app.use("/api/auth", require("./routes/auth"));
 app.use("/api/visitors", require("./routes/visitors"));
 app.use("/api/quiz", require("./routes/quiz"));
+app.use("/api/questions", require("./routes/questions"));
 app.use("/api/admin", require("./routes/admin"));
 app.use("/api/qr", require("./routes/qrcode"));
 app.use("/api/induction", require("./routes/induction"));

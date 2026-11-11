@@ -5,6 +5,10 @@ const { authenticateVisitor } = require("../middleware/auth");
 const { audit, visitorActor } = require("../utils/audit");
 const { validate, quizSubmitRules } = require("../middleware/validate");
 const {
+  getQuizSettings,
+  pickAdminQuestions,
+} = require("../utils/quizSettings");
+const {
   generateQuizFromContent: localGenerate,
 } = require("../utils/quizGenerator");
 
@@ -1207,6 +1211,7 @@ router.get("/generate", authenticateVisitor, async (req, res) => {
         .json({ success: false, message: "Visitor not found" });
 
     const attemptNumber = (visitor.quiz_attempts || 0) + 1;
+    const settings = await getQuizSettings(); // number of questions + pass mark set by the admin
 
     // Check if a fresh cached set exists for this attempt
     const now = new Date();
@@ -1226,6 +1231,7 @@ router.get("/generate", authenticateVisitor, async (req, res) => {
         questions,
         total: questions.length,
         source: "cache",
+        pass_score: settings.pass_score,
       });
     }
 
@@ -1237,20 +1243,24 @@ router.get("/generate", authenticateVisitor, async (req, res) => {
       .orderBy("updated_at", "desc")
       .first();
 
-    let fullQuestions = null;
-    let source = "builtin";
+    // ── Step 0: Questions written by the admin take priority ───────────────────
+    let fullQuestions = await pickAdminQuestions(
+      language,
+      settings.question_count,
+    );
+    let source = fullQuestions ? "admin" : "builtin";
 
-    if (poolRow) {
+    if (!fullQuestions && poolRow) {
       const poolQuestions =
         typeof poolRow.questions === "string"
           ? JSON.parse(poolRow.questions)
           : poolRow.questions;
 
       if (poolQuestions && poolQuestions.length >= 5) {
-        // Randomly pick 5 different questions each attempt
+        // Randomly pick different questions each attempt
         const shuffled = [...poolQuestions].sort(() => Math.random() - 0.5);
         fullQuestions = shuffled
-          .slice(0, 5)
+          .slice(0, settings.question_count)
           .map((q, i) => ({ ...q, id: i + 1 }));
         source = "approved";
       }
@@ -1268,7 +1278,11 @@ router.get("/generate", authenticateVisitor, async (req, res) => {
 
       if (inductionContent.length > 0) {
         // Try local content-based generator
-        fullQuestions = localGenerate(inductionContent, language, 5);
+        fullQuestions = localGenerate(
+          inductionContent,
+          language,
+          settings.question_count,
+        );
         if (fullQuestions) source = "content-ai";
 
         // Try OpenAI if local didn't work
@@ -1282,7 +1296,11 @@ router.get("/generate", authenticateVisitor, async (req, res) => {
             return sections.join("\n");
           });
           const ctx = contextParts.join("\n\n---\n\n");
-          fullQuestions = await generateAIQuiz(language, ctx, 5);
+          fullQuestions = await generateAIQuiz(
+            language,
+            ctx,
+            settings.question_count,
+          );
           if (fullQuestions) source = "ai";
         }
       }
@@ -1294,7 +1312,7 @@ router.get("/generate", authenticateVisitor, async (req, res) => {
         language,
         parseInt(visitor_id, 10),
         attemptNumber,
-        5,
+        settings.question_count,
       );
       source = "builtin";
     }
@@ -1319,7 +1337,13 @@ router.get("/generate", authenticateVisitor, async (req, res) => {
       text,
       options,
     }));
-    res.json({ success: true, questions, total: questions.length, source });
+    res.json({
+      success: true,
+      questions,
+      total: questions.length,
+      source,
+      pass_score: settings.pass_score,
+    });
   } catch (err) {
     console.error("Quiz generate error:", err);
     res.status(500).json({ success: false, message: err.message });
@@ -1381,6 +1405,7 @@ router.post(
           .json({ success: false, message: "Visitor not found" });
 
       const attemptNumber = (visitor.quiz_attempts || 0) + 1;
+      const settings = await getQuizSettings();
 
       // Retrieve cached full questions (with correct answers) for this attempt
       const cached = await db("quiz_question_cache")
@@ -1394,6 +1419,20 @@ router.post(
             ? JSON.parse(cached.questions)
             : cached.questions;
       } else {
+        // The questions are only kept for 2 hours. If the admin wrote their own questions we cannot
+        // rebuild the same random set, so ask the visitor to start again instead of grading wrongly.
+        if (await pickAdminQuestions(language, 1)) {
+          lastSubmitTime.delete(visitor_id);
+          return res
+            .status(410)
+            .json({
+              success: false,
+              code: "QUIZ_EXPIRED",
+              message:
+                "Your quiz session expired. Please reload the quiz and try again.",
+            });
+        }
+
         // No cache — try to reconstruct from approved pool first, then built-in bank
         const poolRow = await db("active_quiz_pool")
           .where({ language })
@@ -1409,7 +1448,7 @@ router.post(
           if (poolQs && poolQs.length >= 5) {
             const shuffled = [...poolQs].sort(() => Math.random() - 0.5);
             fullQuestions = shuffled
-              .slice(0, 5)
+              .slice(0, settings.question_count)
               .map((q, i) => ({ ...q, id: i + 1 }));
           }
         }
@@ -1420,7 +1459,7 @@ router.post(
             language,
             parseInt(visitor_id, 10),
             attemptNumber,
-            5,
+            settings.question_count,
           );
         }
       }
@@ -1451,10 +1490,12 @@ router.post(
         })
         .filter(Boolean);
 
-      const total = gradedAnswers.length;
+      // Score against ALL the questions in the quiz — skipped questions count as wrong
+      // (otherwise answering a single question correctly would give 100 %)
+      const total = fullQuestions.length;
       const percentage =
         total > 0 ? Math.round((correctCount / total) * 100) : 0;
-      const passed = percentage >= 80;
+      const passed = percentage >= settings.pass_score;
 
       // ── 1. Update visitor ─────────────────────────────────────────────────────
       await db("visitors")
@@ -1528,11 +1569,12 @@ router.post(
         total,
         percentage,
         passed,
+        pass_score: settings.pass_score,
         attempt: attemptNumber,
         results: gradedAnswers,
         message: passed
           ? "Congratulations! You have passed the HSE induction assessment."
-          : `You scored ${percentage}%. You need at least 80% to pass. Please try again.`,
+          : `You scored ${percentage}%. You need at least ${settings.pass_score}% to pass. Please try again.`,
       });
     } catch (err) {
       console.error("Quiz submit error:", err);
