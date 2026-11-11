@@ -1365,22 +1365,18 @@ router.post(
         !Array.isArray(answers) ||
         answers.length === 0
       ) {
-        return res
-          .status(400)
-          .json({
-            success: false,
-            message: "visitor_id and answers array required",
-          });
+        return res.status(400).json({
+          success: false,
+          message: "visitor_id and answers array required",
+        });
       }
 
       // Ownership check
       if (req.visitorSession.visitor_id !== parseInt(visitor_id, 10)) {
-        return res
-          .status(403)
-          .json({
-            success: false,
-            message: "Token does not match this visitor",
-          });
+        return res.status(403).json({
+          success: false,
+          message: "Token does not match this visitor",
+        });
       }
 
       // Per-visitor cooldown — prevent rapid-fire brute forcing
@@ -1423,14 +1419,12 @@ router.post(
         // rebuild the same random set, so ask the visitor to start again instead of grading wrongly.
         if (await pickAdminQuestions(language, 1)) {
           lastSubmitTime.delete(visitor_id);
-          return res
-            .status(410)
-            .json({
-              success: false,
-              code: "QUIZ_EXPIRED",
-              message:
-                "Your quiz session expired. Please reload the quiz and try again.",
-            });
+          return res.status(410).json({
+            success: false,
+            code: "QUIZ_EXPIRED",
+            message:
+              "Your quiz session expired. Please reload the quiz and try again.",
+          });
         }
 
         // No cache — try to reconstruct from approved pool first, then built-in bank
