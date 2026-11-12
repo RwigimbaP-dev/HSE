@@ -36,6 +36,46 @@ const parseJson = (v) => {
   }
 };
 
+/** Group option rows by question id (in display order). */
+function groupOptions(options) {
+  const byQuestion = {};
+  for (const o of options) (byQuestion[o.question_id] ||= []).push(o);
+  return byQuestion;
+}
+
+const isUsable = (opts) =>
+  (opts || []).length >= 2 && opts.filter((o) => o.is_correct).length === 1;
+
+/** One bank question in the visitor's language (translation, or the original text if none exists). */
+function renderQuestion(q, opts, language, position) {
+  let text = q.question_text;
+  let optionTexts = opts.map((o) => o.option_text);
+  let explanation = q.explanation || "";
+
+  const tr =
+    language !== q.language ? parseJson(q.translations)?.[language] : null;
+  if (
+    tr &&
+    tr.question_text &&
+    Array.isArray(tr.options) &&
+    tr.options.length === opts.length &&
+    tr.options.every(Boolean)
+  ) {
+    text = tr.question_text;
+    optionTexts = tr.options;
+    explanation = tr.explanation || "";
+  }
+
+  return {
+    id: position,
+    text,
+    options: optionTexts,
+    correct: opts.findIndex((o) => o.is_correct),
+    explanation,
+    bank_id: q.id,
+  };
+}
+
 /**
  * Questions written by the admin, in the visitor's language.
  * A question is written once (in its "source" language) and translated automatically:
@@ -54,47 +94,50 @@ async function pickAdminQuestions(language, count) {
     )
     .orderBy("sort_order", "asc")
     .orderBy("id", "asc");
+  const byQuestion = groupOptions(options);
 
-  const byQuestion = {};
-  for (const o of options) (byQuestion[o.question_id] ||= []).push(o);
-
-  const usable = questions.filter((q) => {
-    const opts = byQuestion[q.id] || [];
-    return opts.length >= 2 && opts.filter((o) => o.is_correct).length === 1;
-  });
+  const usable = questions.filter((q) => isUsable(byQuestion[q.id]));
   if (usable.length === 0) return null;
 
   // Random questions each attempt, in a random order
   const picked = [...usable].sort(() => Math.random() - 0.5).slice(0, count);
-  return picked.map((q, i) => {
-    const opts = byQuestion[q.id];
-    let text = q.question_text;
-    let optionTexts = opts.map((o) => o.option_text);
-    let explanation = q.explanation || "";
-
-    const tr =
-      language !== q.language ? parseJson(q.translations)?.[language] : null;
-    if (
-      tr &&
-      tr.question_text &&
-      Array.isArray(tr.options) &&
-      tr.options.length === opts.length &&
-      tr.options.every(Boolean)
-    ) {
-      text = tr.question_text;
-      optionTexts = tr.options;
-      explanation = tr.explanation || "";
-    }
-
-    return {
-      id: i + 1,
-      text,
-      options: optionTexts,
-      correct: opts.findIndex((o) => o.is_correct),
-      explanation,
-      bank_id: q.id,
-    };
-  });
+  return picked.map((q, i) =>
+    renderQuestion(q, byQuestion[q.id], language, i + 1),
+  );
 }
 
-module.exports = { getQuizSettings, saveSetting, pickAdminQuestions };
+/**
+ * The SAME questions (same order) as an earlier set, shown in another language.
+ * Used when a visitor switches language in the middle of a quiz, so they keep the same quiz.
+ * Returns null if any of those questions was deleted, switched off or changed to an unusable shape,
+ * in which case the caller should simply pick a new set.
+ */
+async function rebuildAdminQuestions(language, bankIds) {
+  if (!Array.isArray(bankIds) || bankIds.length === 0) return null;
+  const ids = bankIds.map((n) => parseInt(n, 10));
+  if (ids.some((n) => !Number.isFinite(n))) return null;
+
+  const questions = await db("quiz_questions")
+    .whereIn("id", ids)
+    .where({ is_active: true });
+  const qById = Object.fromEntries(questions.map((q) => [q.id, q]));
+  if (ids.some((id) => !qById[id])) return null;
+
+  const options = await db("quiz_options")
+    .whereIn("question_id", ids)
+    .orderBy("sort_order", "asc")
+    .orderBy("id", "asc");
+  const byQuestion = groupOptions(options);
+  if (ids.some((id) => !isUsable(byQuestion[id]))) return null;
+
+  return ids.map((id, i) =>
+    renderQuestion(qById[id], byQuestion[id], language, i + 1),
+  );
+}
+
+module.exports = {
+  getQuizSettings,
+  saveSetting,
+  pickAdminQuestions,
+  rebuildAdminQuestions,
+};

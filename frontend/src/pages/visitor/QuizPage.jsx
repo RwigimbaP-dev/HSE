@@ -42,15 +42,17 @@ export default function QuizPage() {
       navigate("/visitor/register");
       return;
     }
-    loadQuiz();
+    // Switching language keeps the same quiz, so the visitor keeps the answers already picked
+    loadQuiz({ keepAnswers: true });
   }, [visitor, language]);
 
-  const loadQuiz = async () => {
+  const loadQuiz = async ({ keepAnswers = false } = {}) => {
     setLoading(true);
-    setAnswers({});
     setResult(null);
     try {
       const res = await quizAPI.generate(visitor.id, language);
+      // Same questions, same order, same option order → earlier answers still line up
+      if (!(keepAnswers && res.data.same_quiz)) setAnswers({});
       setQuestions(res.data.questions);
       if (res.data.pass_score) setPassScore(res.data.pass_score);
     } catch (err) {

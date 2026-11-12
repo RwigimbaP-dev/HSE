@@ -7,6 +7,7 @@ const { validate, quizSubmitRules } = require("../middleware/validate");
 const {
   getQuizSettings,
   pickAdminQuestions,
+  rebuildAdminQuestions,
 } = require("../utils/quizSettings");
 const {
   generateQuizFromContent: localGenerate,
@@ -1188,6 +1189,36 @@ Respond ONLY with valid JSON in this exact format (no markdown, no extra text):
   }
 }
 
+// One quiz, all languages: if the visitor already has an unexpired quiz for this attempt in ANOTHER
+// language (they switched language part-way), return that quiz's question ids so we can show the same
+// questions in the new language instead of drawing a new random set.
+async function sameQuizInOtherLanguage(visitorId, attemptNumber, language) {
+  const rows = await db("quiz_question_cache")
+    .where({ visitor_id: visitorId, attempt_number: attemptNumber })
+    .whereNot({ language })
+    .where("expires_at", ">", new Date().toISOString())
+    .orderBy("created_at", "desc");
+  for (const row of rows) {
+    let qs;
+    try {
+      qs =
+        typeof row.questions === "string"
+          ? JSON.parse(row.questions)
+          : row.questions;
+    } catch {
+      continue;
+    }
+    if (Array.isArray(qs) && qs.length && qs.every((q) => q.bank_id)) {
+      const rebuilt = await rebuildAdminQuestions(
+        language,
+        qs.map((q) => q.bank_id),
+      );
+      if (rebuilt) return rebuilt;
+    }
+  }
+  return null;
+}
+
 // ─── GET /api/quiz/generate?language=en&visitor_id=1 ─────────────────────────
 router.get("/generate", authenticateVisitor, async (req, res) => {
   try {
@@ -1231,6 +1262,7 @@ router.get("/generate", authenticateVisitor, async (req, res) => {
         questions,
         total: questions.length,
         source: "cache",
+        same_quiz: true,
         pass_score: settings.pass_score,
       });
     }
@@ -1244,10 +1276,19 @@ router.get("/generate", authenticateVisitor, async (req, res) => {
       .first();
 
     // ── Step 0: Questions written by the admin take priority ───────────────────
-    let fullQuestions = await pickAdminQuestions(
+    // Same questions if the visitor just switched language; otherwise a fresh random set
+    let fullQuestions = await sameQuizInOtherLanguage(
+      parseInt(visitor_id, 10),
+      attemptNumber,
       language,
-      settings.question_count,
     );
+    const sameQuiz = !!fullQuestions;
+    if (!fullQuestions) {
+      fullQuestions = await pickAdminQuestions(
+        language,
+        settings.question_count,
+      );
+    }
     let source = fullQuestions ? "admin" : "builtin";
 
     if (!fullQuestions && poolRow) {
@@ -1342,6 +1383,7 @@ router.get("/generate", authenticateVisitor, async (req, res) => {
       questions,
       total: questions.length,
       source,
+      same_quiz: sameQuiz,
       pass_score: settings.pass_score,
     });
   } catch (err) {
@@ -1417,7 +1459,14 @@ router.post(
       } else {
         // The questions are only kept for 2 hours. If the admin wrote their own questions we cannot
         // rebuild the same random set, so ask the visitor to start again instead of grading wrongly.
-        if (await pickAdminQuestions(language, 1)) {
+        const sameQuiz = await sameQuizInOtherLanguage(
+          visitor_id,
+          attemptNumber,
+          language,
+        );
+        if (sameQuiz) {
+          fullQuestions = sameQuiz;
+        } else if (await pickAdminQuestions(language, 1)) {
           lastSubmitTime.delete(visitor_id);
           return res.status(410).json({
             success: false,
@@ -1434,7 +1483,7 @@ router.post(
           .orderBy("updated_at", "desc")
           .first();
 
-        if (poolRow) {
+        if (!fullQuestions && poolRow) {
           const poolQs =
             typeof poolRow.questions === "string"
               ? JSON.parse(poolRow.questions)
