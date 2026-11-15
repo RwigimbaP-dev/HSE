@@ -18,6 +18,8 @@ const newOption = (text = "", is_correct = false) => ({
   is_correct,
 });
 const blankOptions = () => [newOption(), newOption(), newOption(), newOption()];
+const blankTr = () => ({ text: "", explanation: "", opts: {} });
+const blankTrAll = () => ({ en: blankTr(), fr: blankTr(), rw: blankTr() });
 
 /**
  * Create / edit a quiz question together with its answer options.
@@ -28,6 +30,7 @@ export default function QuestionFormModal({
   open,
   question,
   saving,
+  translator, // { available, label, note } — is automatic translation set up on the server?
   onSubmit,
   onCancel,
 }) {
@@ -38,34 +41,61 @@ export default function QuestionFormModal({
   const [isActive, setIsActive] = useState(true);
   const [options, setOptions] = useState(blankOptions());
   const [error, setError] = useState("");
+  // Translations typed by hand: tr[lang] = { text, explanation, opts: { [optionKey]: text } }
+  const [tr, setTr] = useState(blankTrAll());
+  const [trTab, setTrTab] = useState("fr");
+  const [trOpen, setTrOpen] = useState(false);
   const firstRef = useRef(null);
+  const autoAvailable = !!translator?.available;
 
   useEffect(() => {
     if (!open) return;
     setError("");
     if (question) {
-      setLanguage(
-        ["en", "fr", "rw"].includes(question.language)
-          ? question.language
-          : "en",
+      const lang = ["en", "fr", "rw"].includes(question.language)
+        ? question.language
+        : "en";
+      const opts = question.options.map((o) =>
+        newOption(o.option_text, !!o.is_correct),
       );
-      setAutoTranslate(true);
+      setLanguage(lang);
+      setAutoTranslate(autoAvailable);
       setText(question.question_text || "");
       setExplanation(question.explanation || "");
       setIsActive(question.is_active !== false);
-      setOptions(
-        question.options.map((o) => newOption(o.option_text, !!o.is_correct)),
-      );
+      setOptions(opts);
+
+      // show the translations already saved (typed or automatic) so they can be reviewed / edited here
+      const t = blankTrAll();
+      let hasAny = false;
+      for (const [code] of LANGS) {
+        const saved = question.translations?.[code];
+        if (!saved || code === lang) continue;
+        hasAny = true;
+        t[code] = {
+          text: saved.question_text || "",
+          explanation: saved.explanation || "",
+          opts: Object.fromEntries(
+            opts.map((o, i) => [o.key, saved.options?.[i] || ""]),
+          ),
+        };
+      }
+      setTr(t);
+      setTrOpen(hasAny || !autoAvailable);
+      setTrTab(LANGS.find(([c]) => c !== lang)[0]);
     } else {
       setLanguage("en");
-      setAutoTranslate(true);
+      setAutoTranslate(autoAvailable);
       setText("");
       setExplanation("");
       setIsActive(true);
       setOptions(blankOptions());
+      setTr(blankTrAll());
+      setTrOpen(!autoAvailable); // no automatic translation yet → show the manual section right away
+      setTrTab("fr");
     }
     setTimeout(() => firstRef.current?.focus(), 50);
-  }, [open, question]);
+  }, [open, question, autoAvailable]);
 
   if (!open) return null;
 
@@ -86,6 +116,31 @@ export default function QuestionFormModal({
       prev.length < MAX_OPTIONS ? [...prev, newOption()] : prev,
     );
 
+  // ── translations typed by hand ──
+  const filledOpts = options.filter((o) => o.text.trim());
+  const otherLangs = LANGS.filter(([c]) => c !== language);
+  const activeTab = otherLangs.some(([c]) => c === trTab)
+    ? trTab
+    : otherLangs[0][0];
+  const setTrField = (code, patch) =>
+    setTr((prev) => ({ ...prev, [code]: { ...prev[code], ...patch } }));
+  const setTrOpt = (code, key, value) =>
+    setTr((prev) => ({
+      ...prev,
+      [code]: {
+        ...prev[code],
+        opts: { ...prev[code].opts, [key]: value },
+      },
+    }));
+  // "empty" | "partial" | "complete"
+  const trStatus = (code) => {
+    const t = tr[code];
+    const optTexts = filledOpts.map((o) => (t.opts[o.key] || "").trim());
+    const any = t.text.trim() || t.explanation.trim() || optTexts.some(Boolean);
+    if (!any) return "empty";
+    return t.text.trim() && optTexts.every(Boolean) ? "complete" : "partial";
+  };
+
   const submit = (e) => {
     e.preventDefault();
     const filled = options.filter((o) => o.text.trim());
@@ -102,13 +157,35 @@ export default function QuestionFormModal({
       return setError(
         "Two options are identical — each option must be different.",
       );
+
+    // Translations typed by hand: each language is either complete or left empty
+    const translations = {};
+    for (const [code, name] of otherLangs) {
+      const status = trStatus(code);
+      if (status === "partial") {
+        setTrOpen(true);
+        setTrTab(code);
+        return setError(
+          `${name} translation is incomplete — fill the question and all ${filledOpts.length} answer options, or press "Clear" to leave ${name} empty.`,
+        );
+      }
+      if (status === "complete") {
+        translations[code] = {
+          question_text: tr[code].text.trim(),
+          explanation: tr[code].explanation.trim(),
+          options: filledOpts.map((o) => (tr[code].opts[o.key] || "").trim()),
+        };
+      }
+    }
+
     setError("");
     onSubmit({
       language,
+      translations,
       question_text: text.trim(),
       explanation: explanation.trim(),
       is_active: isActive,
-      auto_translate: autoTranslate,
+      auto_translate: autoTranslate && autoAvailable,
       options: filled.map((o) => ({
         option_text: o.text.trim(),
         is_correct: o.is_correct,
@@ -334,27 +411,277 @@ export default function QuestionFormModal({
             </label>
           </div>
 
-          <div className="alert alert-info" style={{ marginTop: 14 }}>
+          {/* ── Translations: type them by hand (works without any API key) ── */}
+          <div
+            style={{
+              marginTop: 14,
+              border: "1px solid var(--gray-200, #e2e8f0)",
+              borderRadius: 10,
+              overflow: "hidden",
+            }}
+          >
+            <button
+              type="button"
+              onClick={() => setTrOpen((v) => !v)}
+              style={{
+                width: "100%",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: 8,
+                padding: "10px 14px",
+                background: "var(--gray-50, #f7fafc)",
+                border: "none",
+                cursor: "pointer",
+                fontWeight: 700,
+                fontSize: "0.9rem",
+                textAlign: "left",
+              }}
+            >
+              <span>
+                🌐 Translations{" "}
+                <span style={{ fontWeight: 400, color: "var(--gray-500)" }}>
+                  (optional — type them yourself)
+                </span>
+              </span>
+              <span style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                {otherLangs.map(([code, name]) => {
+                  const st = trStatus(code);
+                  return (
+                    <span
+                      key={code}
+                      style={{
+                        fontSize: "0.72rem",
+                        fontWeight: 600,
+                        padding: "2px 8px",
+                        borderRadius: 999,
+                        background:
+                          st === "complete"
+                            ? "#c6f6d5"
+                            : st === "partial"
+                              ? "#fefcbf"
+                              : "#edf2f7",
+                        color:
+                          st === "complete"
+                            ? "#276749"
+                            : st === "partial"
+                              ? "#975a16"
+                              : "#718096",
+                      }}
+                    >
+                      {code.toUpperCase()}{" "}
+                      {st === "complete" ? "✓" : st === "partial" ? "…" : "–"}
+                    </span>
+                  );
+                })}
+                <span>{trOpen ? "▲" : "▼"}</span>
+              </span>
+            </button>
+
+            {trOpen && (
+              <div style={{ padding: 14 }}>
+                <div
+                  style={{
+                    fontSize: "0.8rem",
+                    color: "var(--gray-500)",
+                    marginBottom: 10,
+                  }}
+                >
+                  The quiz above is the original. Type its translation into each
+                  language below, or leave a language empty to translate it
+                  later. The correct answer is the same in every language.
+                </div>
+
+                <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+                  {otherLangs.map(([code, name]) => (
+                    <button
+                      key={code}
+                      type="button"
+                      className={`btn btn-sm ${activeTab === code ? "btn-primary" : "btn-ghost"}`}
+                      onClick={() => setTrTab(code)}
+                    >
+                      {name}
+                    </button>
+                  ))}
+                </div>
+
+                {(() => {
+                  const code = activeTab;
+                  const name = LANGS.find(([c]) => c === code)[1];
+                  const t = tr[code];
+                  return (
+                    <div key={code}>
+                      <div className="form-group">
+                        <label className="form-label">Question in {name}</label>
+                        <textarea
+                          rows={2}
+                          className="form-input"
+                          maxLength={500}
+                          style={{
+                            width: "100%",
+                            resize: "vertical",
+                            fontFamily: "inherit",
+                          }}
+                          placeholder={text.trim() || "Translated question"}
+                          value={t.text}
+                          onChange={(e) =>
+                            setTrField(code, { text: e.target.value })
+                          }
+                        />
+                      </div>
+
+                      <div className="form-group">
+                        <label className="form-label">
+                          Answer options in {name}
+                        </label>
+                        {filledOpts.length === 0 && (
+                          <div
+                            style={{
+                              fontSize: "0.8rem",
+                              color: "var(--gray-500)",
+                            }}
+                          >
+                            Write the answer options in the original language
+                            first.
+                          </div>
+                        )}
+                        {filledOpts.map((o, i) => (
+                          <div
+                            key={o.key}
+                            style={{ marginBottom: 8 }}
+                            title={o.text}
+                          >
+                            <div
+                              style={{
+                                fontSize: "0.72rem",
+                                color: "var(--gray-500)",
+                                marginBottom: 2,
+                                display: "flex",
+                                gap: 6,
+                              }}
+                            >
+                              <strong>{LETTERS[i]}</strong>
+                              <span
+                                style={{
+                                  overflow: "hidden",
+                                  textOverflow: "ellipsis",
+                                  whiteSpace: "nowrap",
+                                }}
+                              >
+                                {o.text}
+                              </span>
+                              {o.is_correct && (
+                                <span style={{ color: "#276749" }}>
+                                  ✔ correct
+                                </span>
+                              )}
+                            </div>
+                            <input
+                              className="form-input"
+                              style={{
+                                width: "100%",
+                                ...(o.is_correct
+                                  ? {
+                                      borderColor: "var(--success, #276749)",
+                                      background: "var(--success-bg, #f0fff4)",
+                                    }
+                                  : {}),
+                              }}
+                              maxLength={300}
+                              autoComplete="off"
+                              placeholder={`Option ${LETTERS[i]} in ${name}`}
+                              value={t.opts[o.key] || ""}
+                              onChange={(e) =>
+                                setTrOpt(code, o.key, e.target.value)
+                              }
+                            />
+                          </div>
+                        ))}
+                      </div>
+
+                      <div className="form-group">
+                        <label className="form-label">
+                          Explanation in {name}{" "}
+                          <span
+                            style={{
+                              fontWeight: 400,
+                              color: "var(--gray-400)",
+                              fontSize: "0.75rem",
+                            }}
+                          >
+                            (optional)
+                          </span>
+                        </label>
+                        <textarea
+                          rows={2}
+                          className="form-input"
+                          maxLength={1000}
+                          style={{
+                            width: "100%",
+                            resize: "vertical",
+                            fontFamily: "inherit",
+                          }}
+                          value={t.explanation}
+                          onChange={(e) =>
+                            setTrField(code, { explanation: e.target.value })
+                          }
+                        />
+                      </div>
+
+                      {trStatus(code) !== "empty" && (
+                        <button
+                          type="button"
+                          className="btn btn-ghost btn-sm"
+                          onClick={() =>
+                            setTr((prev) => ({ ...prev, [code]: blankTr() }))
+                          }
+                        >
+                          Clear {name}
+                        </button>
+                      )}
+                    </div>
+                  );
+                })()}
+              </div>
+            )}
+          </div>
+
+          {/* ── Automatic translation (needs an API key on the server) ── */}
+          <div
+            className={`alert ${autoAvailable ? "alert-info" : "alert-warning"}`}
+            style={{ marginTop: 14 }}
+          >
             <label
               style={{
                 display: "flex",
                 alignItems: "flex-start",
                 gap: 8,
-                cursor: "pointer",
+                cursor: autoAvailable ? "pointer" : "default",
+                opacity: autoAvailable ? 1 : 0.85,
               }}
             >
               <input
                 type="checkbox"
-                checked={autoTranslate}
+                checked={autoTranslate && autoAvailable}
+                disabled={!autoAvailable}
                 onChange={(e) => setAutoTranslate(e.target.checked)}
                 style={{ width: 18, height: 18, marginTop: 2, flexShrink: 0 }}
               />
               <span>
-                <strong>🌐 Translate automatically</strong> into the other two
-                languages when you save. You write the quiz once; visitors see
-                it in the language they chose.
-                {question &&
-                  " If you change the question or answers, the translations are redone."}
+                <strong>🌐 Translate automatically</strong>{" "}
+                {autoAvailable ? (
+                  <>
+                    any language you left empty above, when you save.
+                    Translations you typed yourself are never overwritten.
+                  </>
+                ) : (
+                  <>
+                    — not set up yet. Type the translations above now; once an
+                    API key is added on the server you can translate the rest
+                    with one click ("Translate all missing") — nothing typed is
+                    lost.
+                  </>
+                )}
               </span>
             </label>
           </div>

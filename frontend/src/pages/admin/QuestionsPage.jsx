@@ -567,6 +567,7 @@ export default function QuestionsPage() {
       )}
 
       <QuestionFormModal
+        translator={settings?.translator}
         open={!!formModal}
         question={formModal?.question}
         saving={busy}

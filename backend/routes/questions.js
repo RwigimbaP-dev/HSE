@@ -69,6 +69,74 @@ function cleanQuestion(body) {
   };
 }
 
+// Translations typed by hand in the question form: { fr: { question_text, explanation, options[] }, rw: {...} }
+// A language that is left completely empty is simply skipped (it can be translated later).
+// `previous` = the translations already stored; when the master text changed (`masterChanged`) an
+// untouched old translation is dropped because it no longer matches the new question.
+const LANG_NAMES = { en: "English", fr: "French", rw: "Kinyarwanda" };
+
+const sameTranslation = (a, b) =>
+  !!a &&
+  !!b &&
+  String(a.question_text || "") === String(b.question_text || "") &&
+  String(a.explanation || "") === String(b.explanation || "") &&
+  JSON.stringify(a.options || []) === JSON.stringify(b.options || []);
+
+function cleanTranslations(
+  raw,
+  masterLang,
+  optionCount,
+  previous,
+  masterChanged,
+) {
+  const map = {};
+  if (!raw || typeof raw !== "object") return { map };
+
+  for (const lang of LANGS) {
+    if (lang === masterLang || !raw[lang] || typeof raw[lang] !== "object")
+      continue;
+    const t = raw[lang];
+    const name = LANG_NAMES[lang];
+    const question_text = String(t.question_text || "").trim();
+    const explanation = String(t.explanation || "")
+      .trim()
+      .slice(0, 1000);
+    const options = (Array.isArray(t.options) ? t.options : []).map((o) =>
+      String(o || "").trim(),
+    );
+
+    if (!question_text && !explanation && options.every((o) => !o)) continue; // left empty
+
+    const prev = previous?.[lang];
+    const entry = { question_text, explanation, options };
+    if (masterChanged && sameTranslation(entry, prev)) continue; // stale: master text changed
+
+    if (question_text.length < 5 || question_text.length > 500)
+      return {
+        error: `${name} translation: the question must be 5–500 characters.`,
+      };
+    if (
+      options.length !== optionCount ||
+      options.some((o) => !o || o.length > 300)
+    )
+      return {
+        error: `${name} translation: translate all ${optionCount} answer options (300 characters max each), or clear this language.`,
+      };
+    if (new Set(options.map((o) => o.toLowerCase())).size !== options.length)
+      return {
+        error: `${name} translation: two options are identical — each option must be different.`,
+      };
+
+    const unchanged = sameTranslation(entry, prev);
+    map[lang] = {
+      ...entry,
+      auto: unchanged ? !!prev.auto : false,
+      at: unchanged && prev.at ? prev.at : new Date().toISOString(),
+    };
+  }
+  return { map };
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 async function loadQuestions(filter = {}) {
   let q = db("quiz_questions");
@@ -109,11 +177,12 @@ const snapshot = (q) => ({
   options: q.options.map((o) => `${o.is_correct ? "✔ " : ""}${o.option_text}`),
 });
 
-const sourceOf = (q) => ({
+// What the translations depend on: the written text and its language (NOT which answer is correct)
+const textOf = (q) => ({
   language: q.language,
   question_text: q.question_text,
   explanation: q.explanation || "",
-  options: q.options.map((o) => `${o.is_correct ? "1" : "0"}${o.option_text}`),
+  options: q.options.map((o) => o.option_text),
 });
 
 const label = (text) => (text.length > 80 ? `${text.slice(0, 77)}…` : text);
@@ -271,9 +340,25 @@ router.post("/", async (req, res) => {
     const { data, options, error } = cleanQuestion(req.body);
     if (error) return res.status(400).json({ success: false, message: error });
 
+    const tr = cleanTranslations(
+      req.body.translations,
+      data.language,
+      options.length,
+      null,
+      false,
+    );
+    if (tr.error)
+      return res.status(400).json({ success: false, message: tr.error });
+
     const id = await db.transaction(async (trx) => {
       const [row] = await trx("quiz_questions")
-        .insert({ ...data, created_by: req.admin.id })
+        .insert({
+          ...data,
+          translations: Object.keys(tr.map).length
+            ? JSON.stringify(tr.map)
+            : null,
+          created_by: req.admin.id,
+        })
         .returning("id");
       const qid = row?.id ?? row;
       await trx("quiz_options").insert(
@@ -282,9 +367,16 @@ router.post("/", async (req, res) => {
       return qid;
     });
 
+    // Auto-translate ONLY the languages that were not typed in by hand (and only when a service is set up)
     let result = { done: [], failed: [] };
-    if (req.body.auto_translate !== false)
-      result = await autoTranslate(id, LANGS);
+    if (
+      req.body.auto_translate !== false &&
+      translator.providerInfo().available
+    ) {
+      const [saved] = await loadQuestions({ id });
+      const todo = missingLanguages(saved);
+      if (todo.length) result = await autoTranslate(id, todo);
+    }
 
     const [question] = await loadQuestions({ id });
     await audit(req, {
@@ -293,7 +385,11 @@ router.post("/", async (req, res) => {
       entity_type: "quiz_question",
       entity_id: id,
       entity_label: label(question.question_text),
-      after: { ...snapshot(question), translated_to: result.done },
+      after: {
+        ...snapshot(question),
+        translated_to: result.done,
+        typed_translations: Object.keys(tr.map),
+      },
     });
     res.json({
       success: true,
@@ -326,6 +422,28 @@ router.put("/:id", async (req, res) => {
     const { data, options, error } = cleanQuestion(req.body);
     if (error) return res.status(400).json({ success: false, message: error });
 
+    // Did the master text change? (decided BEFORE saving so nothing is half-saved on a validation error)
+    const masterChanged =
+      JSON.stringify(textOf(existing)) !==
+      JSON.stringify(textOf({ ...data, options }));
+
+    // Translations typed in the form (the form always sends the full set it is showing).
+    // An old translation that was NOT touched while the master text changed is dropped as outdated.
+    const formManagesTranslations = req.body.translations !== undefined;
+    let typed = null;
+    if (formManagesTranslations) {
+      const tr = cleanTranslations(
+        req.body.translations,
+        data.language,
+        options.length,
+        existing.translations,
+        masterChanged,
+      );
+      if (tr.error)
+        return res.status(400).json({ success: false, message: tr.error });
+      typed = tr.map;
+    }
+
     await db.transaction(async (trx) => {
       await trx("quiz_questions")
         .where({ id: existing.id })
@@ -342,19 +460,33 @@ router.put("/:id", async (req, res) => {
 
     let [question] = await loadQuestions({ id: existing.id });
 
-    // The master text changed → the old translations are now wrong, so translate again
     let result = { done: [], failed: [] };
-    const masterChanged =
-      JSON.stringify(sourceOf(existing)) !== JSON.stringify(sourceOf(question));
-    if (masterChanged) {
-      if (req.body.auto_translate !== false) {
-        result = await autoTranslate(existing.id, LANGS, { fresh: true });
-      } else {
-        await db("quiz_questions")
-          .where({ id: existing.id })
-          .update({ translations: null });
+    if (typed) {
+      await db("quiz_questions")
+        .where({ id: existing.id })
+        .update({
+          translations: Object.keys(typed).length
+            ? JSON.stringify(typed)
+            : null,
+        });
+    } else if (masterChanged) {
+      // old clients that do not send translations: outdated ones are dropped
+      await db("quiz_questions")
+        .where({ id: existing.id })
+        .update({ translations: null });
+    }
+    [question] = await loadQuestions({ id: existing.id });
+
+    // Auto-translate only what is still missing (typed translations are never overwritten)
+    if (
+      req.body.auto_translate !== false &&
+      translator.providerInfo().available
+    ) {
+      const todo = missingLanguages(question);
+      if (todo.length) {
+        result = await autoTranslate(existing.id, todo);
+        [question] = await loadQuestions({ id: existing.id });
       }
-      [question] = await loadQuestions({ id: existing.id });
     }
 
     const before = snapshot(existing);
